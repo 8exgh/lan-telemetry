@@ -139,6 +139,7 @@ class Application:
         self.host_key = paramiko.RSAKey.from_private_key_file(str(key_path))
 
     def start(self):
+        self.commands.configure_email(self.config)
         self.commands.recover_sessions()
         self.commands.request_reconcile()
         try:

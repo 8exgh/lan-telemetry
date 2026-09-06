@@ -12,7 +12,9 @@ flowchart LR
     Project --> Queries[Authenticated query API]
     Queries --> Worker[Background processor]
     Worker --> Docker[Docker side effects]
+    Worker --> Alerttray[Alerttray email queue API]
     Docker --> Result[Observed outcome]
+    Alerttray --> Result
     Result --> API
     Queries --> Next[Next.js query proxy]
     Next --> Admin[Authenticated dashboard]
@@ -35,6 +37,11 @@ flowchart LR
 | Docker inspected/repaired | Record reconciliation result | `ContainerReconcileCompleted` | Container health / next due time | Processor on next cycle |
 | Connection ends | Record closure | `ConnectionClosed` | Closed session / duration | Dashboard |
 | Collector restart | Recover open sessions | `ConnectionClosed` with unknown end time | Sessions | Dashboard |
+| Collector startup / config change | Configure email notifications | `EmailNotificationsConfigured` | Email settings and source cursor | Processor |
+| New connections accumulated and interval due | Prepare email notification | `EmailNotificationRequested` | Email outbox with immutable message snapshot | Processor |
+| Due outbox batch | Claim email notification | `EmailNotificationAttemptStarted` | Attempt ID and lease expiry | Processor calls Alerttray |
+| Alerttray accepts email | Record email result | `EmailNotificationAccepted` | Accepted receipt, provider ID, channel | Dashboard |
+| API failure / expired attempt | Record email result | `EmailNotificationFailed` | Retry time, final failure or routing pause | Processor / dashboard |
 
 ## Container sequence
 
@@ -65,6 +72,30 @@ sequenceDiagram
 
 SSH container exec is an interaction adapter, just as a network response is a side effect of its protocol adapter. The lifecycle processor exclusively manages container creation/start/restart/health; the observation command handlers themselves only append facts. Both adapters report into the same event store.
 
+## Email sequence
+
+```mermaid
+sequenceDiagram
+    participant C as Collector commands
+    participant E as Events / email outbox
+    participant P as Processor
+    participant A as Alerttray
+    C->>E: ConnectionOpened
+    P->>C: Prepare email notification (Basic processor)
+    C->>E: EmailNotificationRequested + advance source cursor
+    P->>C: Query email-work
+    C-->>P: Next due batch
+    P->>C: Claim batch with attempt UUID
+    C->>E: EmailNotificationAttemptStarted + 60s lease
+    P->>A: POST notifications/push (X-API-Key, medium)
+    A-->>P: Queue receipt or error
+    P->>C: Record email result (Basic processor)
+    C->>E: EmailNotificationAccepted or EmailNotificationFailed
+    Note over P,A: Acceptance is not SMTP confirmation; lost receipts can cause duplicate retries.
+```
+
+Email settings contain no access token. Enabling records the current source sequence so historical events are not sent. Batch preparation atomically snapshots exact connection totals, up to ten examples, and the message, then advances the cursor. Extra connections accumulate while one batch is unfinished. The outbox, cursor, leases and receipts all rebuild from events without invoking Alerttray. Docker work and notification work each get a processor cycle even if the other raises an error.
+
 ## Storage and consistency
 
 * Each session UUID is an aggregate stream. `sandbox` is the lifecycle aggregate; `system` stores collector facts. Aggregate versions are assigned under a single writer lock and protected by a unique `(stream, version)` constraint.
@@ -87,6 +118,7 @@ SSH container exec is an interaction adapter, just as a network response is a si
 | `telemetry/store.py` | Immutable events, hash chain, projections and queries. |
 | `telemetry/api.py` | HTTP Basic identities, command routing and query routing. |
 | `telemetry/processor.py` | Poll work, invoke external work, report outcomes through HTTP commands. |
+| `telemetry/alerttray.py` | Build bounded connection summaries, call Alerttray with X-API-Key, validate email-only receipts and sanitize provider errors. |
 | `telemetry/docker.py` | Fixed Docker policy, lifecycle reconciliation and exec streaming. |
 | `telemetry/peers.py` | Passive neighbor cache; nullable MAC attribution. |
 | `nextjs-app/lib/auth.ts` | Admin authentication and signed sessions. |

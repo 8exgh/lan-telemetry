@@ -61,6 +61,40 @@ npm run dev --prefix nextjs-app
 
 These are three separate terminal commands. For a service at boot, adapt [docs/lan-telemetry.service](docs/lan-telemetry.service) to your user and installation path, then install it with systemd. The service template has not been installed automatically.
 
+## Alerttray email notifications
+
+New honeypot connections can be summarized by email through **https://alerttray.com**. The processor uses Alerttray's public `POST /api/notifications/push` API with your notification access token in the `X-API-Key` header. This is the key created from Alerttray's dashboard, not a browser login/session token. There is no SMTP configuration in this app.
+
+**Email-only account requirement:** the referenced Alerttray implementation routes `medium` severity to email, and also sends APNS push to every registered iPhone. Its public API has no channel override. Use a dedicated Alerttray account with **no registered iPhones**, or otherwise ensure that account has no devices registered. Setting `ALERTTRAY_EMAIL` changes the email recipient but does not disable iPhone push. This integration does not use high/critical severity, which would select phone calls and SMS.
+
+Add your token to the Git-ignored `.env`, then configure:
+
+```dotenv
+ALERTTRAY_ACCESS_TOKEN=your-notification-api-key
+ALERTTRAY_API_URL=https://alerttray.com
+# Set true only after confirming this account has no registered iPhones.
+ALERTTRAY_EMAIL_ONLY_ACCOUNT=true
+# Optional: blank uses the Alerttray account's alert email/account email.
+ALERTTRAY_EMAIL=
+ALERTTRAY_BATCH_SECONDS=60
+ALERTTRAY_DASHBOARD_URL=http://192.168.1.10:3000
+```
+
+Restart the collector and processor after changing these settings. Sending is disabled by default and requires both the token and `ALERTTRAY_EMAIL_ONLY_ACCOUNT=true`. Existing `.env` secrets are preserved; the Alerttray section has been added with an empty token. If your Alerttray account has iPhones registered, explicit channel-selection support must be added to Alerttray before this setup can guarantee email alone for that account.
+
+Each new batch contains the number of connections and unique source IPs, first/last observation timestamps, up to ten examples with source IP/port, destination port, protocol and available MAC, and an optional link to the LAN dashboard. Raw bytes, passwords, HTTP bodies and SSH commands stay in the authenticated event history. Notification messages themselves are also recorded in that history.
+
+* Only **new `ConnectionOpened` events** trigger notifications, across all four sensors. Byte chunks, notification events and periodic Docker checks do not generate more emails.
+* New batches are queued at most once per `ALERTTRAY_BATCH_SECONDS` interval. A burst is summarized into one batch with exact totals and a bounded sample. At most one unfinished batch is active; further connections accumulate for the next batch. Retries follow their own backoff schedule.
+* Enabling notifications starts from the current event sequence; it does not email old activity. Removing the token pauses delivery. Pending batches survive restart and resume when enabled; connections observed while disabled are not backfilled. A queued batch retains any explicitly configured email recipient from when it was created.
+* Requests and outcomes are events. Read models include a durable outbox, attempts and next retry time. Network failures, HTTP 408/429 and server errors retry with backoff, up to five attempts. `Retry-After` in integer seconds is honored up to one hour. Other HTTP failures, such as invalid credentials, finish that batch as failed.
+* Alerttray's reference API has **no idempotency support**. A lost response or crash after acceptance can produce a duplicate on retry. Local command retries are idempotent, and a sixty-second attempt lease prevents overlapping workers from immediately resending an in-flight batch. This is not exactly-once email delivery.
+* A successful API response means **accepted by Alerttray**, not confirmed SMTP delivery. The dashboard uses that wording. If Alerttray reports missing email or additional channels, the batch fails and further email work pauses. This check happens after Alerttray queues the notification, so it cannot undo a push already queued if the account was misconfigured. Correct the account and restart the collector to clear the pause.
+
+The access token is never written into notification events, API query responses or browser code. The client rejects redirects and requires HTTPS for the Alerttray endpoint. Provider errors are recorded as controlled status messages rather than raw response bodies. All delivery work runs in the processor through the existing Basic-auth command/query API; listener commands and projection replay never send email.
+
+Reference inspected: the local checkout of [`8exgh/alerttray`](https://github.com/8exgh/alerttray), commit `13be82e`, particularly [`app/api/notifications/push/route.ts`](https://github.com/8exgh/alerttray/blob/13be82e/nextjs_alerttray/app/api/notifications/push/route.ts) and [`lib/delivery/routing-policy.ts`](https://github.com/8exgh/alerttray/blob/13be82e/nextjs_alerttray/lib/delivery/routing-policy.ts). The deployed API and actual email delivery have not been exercised from this restricted environment. Notification tests use an injected API client and never contact live recipients.
+
 ## Capture and storage
 
 All observations live in `data/events.sqlite3`, including binary payloads as SQLite BLOBs. There are no container-side session log files to tamper with. Events include a global sequence, UUID, aggregate version, UTC timestamp with microsecond formatting, metadata, payload digest, and chained event hash. Session events include source IP/port, destination IP/port, address family, protocol, session ID and available neighbor information. The database, host key and directory are private to the service account.
@@ -118,12 +152,18 @@ The collector owns the event store. Protocol adapters call local command handler
 | GET | `/api/queries/events?session=<id>&before=<seq>&after=0&kind=<type>&protocol=raw&ip=<ip>&limit=100` | `dashboard` or `processor` |
 | GET | `/api/queries/payload/<seq>` | `dashboard` or `processor`; binary response |
 | GET | `/api/queries/container-work` | `dashboard` or `processor` |
+| GET | `/api/queries/email-work` | `dashboard` or `processor`; next due notification |
 | POST | `/api/commands/request-container-reconcile` with `{}` | `processor` only |
 | POST | `/api/commands/record-container-reconciled` | `processor` only |
+| POST | `/api/commands/prepare-email-notification` with `{}` | `processor` only |
+| POST | `/api/commands/claim-email-notification` with `notification_id`, `attempt_id` | `processor` only |
+| POST | `/api/commands/record-email-notification-result` | `processor` only |
 
 `PROCESSOR_PASSWORD` and `QUERY_PASSWORD` are generated independently. The browser receives neither. Next.js proxies only an allowlist of query endpoints after validating a signed, expiring HttpOnly session cookie. Dashboard login is `admin/ADMIN_PASSWORD`; it has origin checking and a ten-failed-attempts-per-minute limit per Next.js process.
 
 The processor completion body contains `request_id`, `status` (`healthy`, `starting`, `failed`), and optional `container_id`, `health`, `actions`, and `error`. Repeated completions for the current request are idempotent; stale request IDs are rejected. A pending request remains pending across crashes. Reconciliation adopts only the application's labeled container with the expected isolation configuration; a conflicting name/configuration produces a failure event rather than changing another container.
+
+Email completion bodies contain `notification_id`, `attempt_id` and `outcome` (`accepted` or `failed`). Acceptance requires `provider_notification_id` and `channels: ["email"]`. Failures supply a bounded `error_code`, `error`, optional `retryable` boolean and `retry_after` seconds. Outcomes for stale attempts are rejected. `/api/queries/summary` includes an `email` status object for the dashboard.
 
 ## Verification
 

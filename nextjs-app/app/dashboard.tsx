@@ -42,6 +42,17 @@ type Summary = {
     actions?: string[];
     pending?: boolean;
   };
+  email?: {
+    enabled: boolean;
+    configuration: string;
+    blocked: boolean;
+    blocked_reason?: string;
+    batch_seconds: number;
+    accepted: number;
+    pending: number;
+    failed: number;
+    latest?: { status: string; last_error?: string; accepted_at?: string };
+  };
 };
 const names: Record<string, string> = {
   raw: "TCP catch-all",
@@ -349,6 +360,35 @@ export default function Dashboard() {
                   : "Waiting for the background processor")}
             </span>
             {summary?.container.pending && <small>Check pending</small>}
+          </section>
+          <section className="sandbox-status" aria-label="Email notifications">
+            <span
+              className={`status-dot ${summary?.email?.enabled && !summary.email.blocked && !summary.email.latest?.last_error ? "" : "amber"}`}
+            />
+            <strong>Alerttray email</strong>
+            <span className="subtle-badge">
+              {!summary?.email?.enabled
+                ? "Not configured"
+                : summary.email.blocked
+                  ? "Paused"
+                  : summary.email.latest?.status === "retry"
+                    ? "Retrying"
+                    : summary.email.latest?.status === "failed"
+                      ? "Needs attention"
+                      : "Enabled"}
+            </span>
+            <span className="muted">
+              {summary?.email?.blocked_reason ||
+                (summary?.email?.configuration === "email-only-account-required"
+                  ? "Confirm an Alerttray account with no registered iPhones in .env."
+                  : !summary?.email?.enabled
+                    ? "Set your Alerttray access token and email account settings in .env."
+                    : summary.email.latest?.last_error ||
+                      `Connection summaries · ${summary.email.batch_seconds}s interval · ${summary.email.accepted} accepted by Alerttray`)}
+            </span>
+            {!!summary?.email?.pending && (
+              <small>{summary.email.pending} pending</small>
+            )}
           </section>
           <section className="panel" id="sessions">
             <div className="panel-heading wrap">

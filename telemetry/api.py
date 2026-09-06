@@ -54,6 +54,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.reply(404, {"error": "Event not found"}) if payload is None else self.reply(200, payload, binary=True)
             elif url.path == "/api/queries/container-work":
                 self.reply(200, store.runtime())
+            elif url.path == "/api/queries/email-work":
+                self.reply(200, {"job": store.email_work()})
             else:
                 self.reply(404, {"error": "Unknown query"})
         except (ValueError, TypeError):
@@ -78,6 +80,12 @@ class APIHandler(BaseHTTPRequestHandler):
                 result = self.server.commands.request_reconcile()
             elif self.path == "/api/commands/record-container-reconciled":
                 result = self.server.commands.complete_reconcile(command)
+            elif self.path == "/api/commands/prepare-email-notification":
+                result = self.server.commands.prepare_email()
+            elif self.path == "/api/commands/claim-email-notification":
+                result = self.server.commands.claim_email(command)
+            elif self.path == "/api/commands/record-email-notification-result":
+                result = self.server.commands.complete_email(command)
             else:
                 self.reply(404, {"error": "Unknown command"})
                 return
