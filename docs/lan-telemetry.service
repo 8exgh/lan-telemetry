@@ -1,0 +1,20 @@
+[Unit]
+Description=LAN telemetry honeypot and dashboard
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Adjust these three paths and User before installing.
+User=sean
+WorkingDirectory=/home/sean/8Examples/lan-telemetry
+ExecStart=/home/sean/8Examples/lan-telemetry/.venv/bin/python scripts/run.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

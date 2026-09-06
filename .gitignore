@@ -1,0 +1,11 @@
+.idea/
+.env
+.venv/
+__pycache__/
+*.pyc
+data/
+node_modules/
+.next/
+*.tsbuildinfo
+nextjs-app/next-env.d.ts
+test-results/
